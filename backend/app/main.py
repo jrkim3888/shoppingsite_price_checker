@@ -5,15 +5,18 @@ from datetime import datetime, timezone
 import json
 from fastapi import FastAPI, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.schemas import SearchRequest, MoreRequest
 from app.services.search_service import SearchService
 from app.services.image_llm_service import infer_style_with_gpt
 from app.services.image_similarity_service import rerank_by_image_similarity
 
-app = FastAPI(title="fashion-finder", version="0.1.0")
+app = FastAPI(title="Clothes Search", version="0.1.0")
 service = SearchService()
-FRONTEND_INDEX = Path(__file__).resolve().parents[2] / "frontend" / "index.html"
+FRONTEND_ROOT = Path(__file__).resolve().parents[2] / "frontend"
+FRONTEND_INDEX = FRONTEND_ROOT / "index.html"
+app.mount("/assets", StaticFiles(directory=FRONTEND_ROOT / "assets"), name="assets")
 IMAGE_SEARCH_HISTORY = Path(__file__).resolve().parents[2] / "logs" / "image-search-history.jsonl"
 DISLIKE_HISTORY = Path(__file__).resolve().parents[2] / "logs" / "image-feedback-dislike.jsonl"
 LIKE_HISTORY = Path(__file__).resolve().parents[2] / "logs" / "image-feedback-like.jsonl"
