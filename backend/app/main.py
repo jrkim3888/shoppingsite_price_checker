@@ -44,11 +44,14 @@ def _load_dislike_history() -> None:
             if not line.strip():
                 continue
             row = json.loads(line)
-            if row.get("action") != "dislike":
-                continue
+            action = row.get("action")
             url = (row.get("product_url") or "").strip()
-            if url:
+            if not url:
+                continue
+            if action == "dislike":
                 DISLIKED_PRODUCT_URLS.add(url)
+            elif action == "undislike":
+                DISLIKED_PRODUCT_URLS.discard(url)
     except Exception:
         return
 
@@ -156,6 +159,12 @@ async def image_feedback(
         DISLIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
         with DISLIKE_HISTORY.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": ts, "action": action, "title": title, "product_url": product_url}, ensure_ascii=False) + "\n")
+    elif action == "undislike":
+        if product_url:
+            DISLIKED_PRODUCT_URLS.discard(product_url.strip())
+        DISLIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
+        with DISLIKE_HISTORY.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": ts, "action": action, "title": title, "product_url": product_url}, ensure_ascii=False) + "\n")
     elif action == "like":
         if product_url:
             LIKED_ITEMS[product_url] = {
@@ -188,6 +197,15 @@ async def liked_items():
     items = list(LIKED_ITEMS.values())
     items.sort(key=lambda x: x.get("ts", ""), reverse=True)
     return {"ok": True, "items": items}
+
+
+@app.get("/feedback-state")
+async def feedback_state():
+    return {
+        "ok": True,
+        "liked_urls": list(LIKED_ITEMS.keys()),
+        "disliked_urls": list(DISLIKED_PRODUCT_URLS),
+    }
 
 
 @app.post("/image-search")

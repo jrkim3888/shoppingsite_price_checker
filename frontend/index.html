@@ -120,7 +120,10 @@
       nextMap: {},
       generatedAt: null,
       autoRefreshStarted: false,
-      sortBy: 'popular'
+      sortBy: 'popular',
+      likedUrls: new Set(),
+      dislikedUrls: new Set(),
+      feedbackLoading: new Set(),
     };
 
     function money(v){ return typeof v === 'number' ? v.toLocaleString('ko-KR') + '원' : '-'; }
@@ -154,9 +157,16 @@
             ${typeof it.similarity === 'number' ? `<div class="mt-1 text-xs text-indigo-600">유사도 ${(it.similarity * 100).toFixed(1)}%</div>` : ''}
             <a href="${it.product_url}" target="_blank" rel="noreferrer" class="mt-2 inline-block text-xs font-semibold text-indigo-600 hover:text-indigo-500">원문 상품 보기</a>
             <div class="mt-2 flex gap-1.5">
-              <button class="rounded-lg border border-slate-200 px-2 py-1 text-[11px]" onclick="sendImageFeedback('like','${esc(it.product_url)}','${esc(it.title)}','${esc(it.brand)}','${esc(String(it.price ?? ''))}','${esc(it.thumbnail)}')">👍 좋아요</button>
-              <button class="rounded-lg border border-slate-200 px-2 py-1 text-[11px]" onclick="sendImageFeedback('unlike','${esc(it.product_url)}','${esc(it.title)}','${esc(it.brand)}','${esc(String(it.price ?? ''))}','${esc(it.thumbnail)}')">↩ 취소</button>
-              <button class="rounded-lg border border-slate-200 px-2 py-1 text-[11px]" onclick="sendImageFeedback('dislike','${esc(it.product_url)}','${esc(it.title)}','${esc(it.brand)}','${esc(String(it.price ?? ''))}','${esc(it.thumbnail)}')">🚫 아님</button>
+              <button
+                class="rounded-lg border px-2 py-1 text-[11px] ${state.likedUrls.has(it.product_url) ? 'border-pink-500 bg-pink-50 text-pink-700' : 'border-slate-200'}"
+                onclick="toggleLike('${esc(it.product_url)}','${esc(it.title)}','${esc(it.brand)}','${esc(String(it.price ?? ''))}','${esc(it.thumbnail)}')"
+                ${state.feedbackLoading.has(it.product_url) ? 'disabled' : ''}
+              >${state.likedUrls.has(it.product_url) ? '❤️ 좋아요됨' : '🤍 좋아요'}</button>
+              <button
+                class="rounded-lg border px-2 py-1 text-[11px] ${state.dislikedUrls.has(it.product_url) ? 'border-slate-700 bg-slate-100 text-slate-800' : 'border-slate-200'}"
+                onclick="toggleDislike('${esc(it.product_url)}','${esc(it.title)}','${esc(it.brand)}','${esc(String(it.price ?? ''))}','${esc(it.thumbnail)}')"
+                ${state.feedbackLoading.has(it.product_url) ? 'disabled' : ''}
+              >${state.dislikedUrls.has(it.product_url) ? '🚫 아님 처리됨' : '🚫 아님'}</button>
             </div>
           </div>`;
         grid.appendChild(card);
@@ -176,7 +186,7 @@
       return '기본(인기)';
     }
 
-    async function sendImageFeedback(action, productUrl, title, brand, price, thumbnail){
+    async function postFeedback(action, productUrl, title, brand, price, thumbnail){
       const fd = new FormData();
       fd.append('action', action);
       fd.append('product_url', productUrl || '');
@@ -185,12 +195,68 @@
       fd.append('price', price || '');
       fd.append('thumbnail', thumbnail || '');
       await fetch('/image-feedback', { method:'POST', body: fd });
-      if (action === 'dislike') imageMeta.textContent = '해당 상품은 이후 검색에서 숨김 처리됩니다.';
-      else if (action === 'like') imageMeta.textContent = '좋아요 리스트에 저장했어요.';
-      else if (action === 'unlike') imageMeta.textContent = '좋아요를 취소했어요.';
+    }
+
+    async function syncFeedbackState(){
+      try {
+        const res = await fetch('/feedback-state');
+        const data = await res.json();
+        if (!data.ok) return;
+        state.likedUrls = new Set(data.liked_urls || []);
+        state.dislikedUrls = new Set(data.disliked_urls || []);
+      } catch (_) {}
+    }
+
+    async function toggleLike(productUrl, title, brand, price, thumbnail){
+      if (!productUrl || state.feedbackLoading.has(productUrl)) return;
+      state.feedbackLoading.add(productUrl);
+      try {
+        const isLiked = state.likedUrls.has(productUrl);
+        if (isLiked) {
+          await postFeedback('unlike', productUrl, title, brand, price, thumbnail);
+          state.likedUrls.delete(productUrl);
+          imageMeta.textContent = '좋아요를 취소했어요.';
+        } else {
+          await postFeedback('like', productUrl, title, brand, price, thumbnail);
+          state.likedUrls.add(productUrl);
+          if (state.dislikedUrls.has(productUrl)) {
+            await postFeedback('undislike', productUrl, title, brand, price, thumbnail);
+            state.dislikedUrls.delete(productUrl);
+          }
+          imageMeta.textContent = '좋아요로 저장했어요.';
+        }
+      } finally {
+        state.feedbackLoading.delete(productUrl);
+        render(state.items);
+      }
+    }
+
+    async function toggleDislike(productUrl, title, brand, price, thumbnail){
+      if (!productUrl || state.feedbackLoading.has(productUrl)) return;
+      state.feedbackLoading.add(productUrl);
+      try {
+        const isDisliked = state.dislikedUrls.has(productUrl);
+        if (isDisliked) {
+          await postFeedback('undislike', productUrl, title, brand, price, thumbnail);
+          state.dislikedUrls.delete(productUrl);
+          imageMeta.textContent = '아님 처리를 취소했어요.';
+        } else {
+          await postFeedback('dislike', productUrl, title, brand, price, thumbnail);
+          state.dislikedUrls.add(productUrl);
+          if (state.likedUrls.has(productUrl)) {
+            await postFeedback('unlike', productUrl, title, brand, price, thumbnail);
+            state.likedUrls.delete(productUrl);
+          }
+          imageMeta.textContent = '해당 상품은 이후 검색에서 숨김 처리됩니다.';
+        }
+      } finally {
+        state.feedbackLoading.delete(productUrl);
+        render(state.items);
+      }
     }
 
     async function showLikedItems(){
+      await syncFeedbackState();
       const res = await fetch('/liked');
       const data = await res.json();
       if (!data.ok) return;
@@ -231,6 +297,7 @@
       state.items = data.items || [];
       state.nextMap = {};
       state.generatedAt = new Date().toISOString();
+      await syncFeedbackState();
       render(state.items);
       updateMoreButton();
       metaMain.textContent = `이미지 유사 검색 결과 ${state.items.length}개 · ${formatKST(state.generatedAt)}`;
@@ -284,6 +351,7 @@
       const siteCounts = (data.results || []).map(r => `${r.site} ${r.items.length}개`).join(', ');
       metaMain.textContent = `결과 ${state.items.length}개 · ${formatKST(state.generatedAt)}`;
       metaSub.textContent = `정렬: ${sortLabel(state.sortBy)} · 사이트별: ${siteCounts}`;
+      await syncFeedbackState();
       render(state.items);
       updateMoreButton();
     }
@@ -326,8 +394,11 @@
       metaSub.textContent = `정렬: ${sortLabel(state.sortBy)} · 더보기 반영 완료`;
     }
 
-    runSearch();
-    startAutoRefresh();
+    (async () => {
+      await syncFeedbackState();
+      await runSearch();
+      startAutoRefresh();
+    })();
   </script>
 </body>
 </html>
