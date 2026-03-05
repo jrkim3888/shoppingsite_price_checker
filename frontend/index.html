@@ -195,7 +195,14 @@
       fd.append('brand', brand || '');
       fd.append('price', price || '');
       fd.append('thumbnail', thumbnail || '');
-      await fetch('/image-feedback', { method:'POST', body: fd });
+      const res = await fetch('/image-feedback', { method:'POST', body: fd });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || 'feedback request failed');
+      }
+      const data = await res.json();
+      if (!data.ok) throw new Error('feedback rejected');
+      return data;
     }
 
     async function syncFeedbackState(){
@@ -226,6 +233,8 @@
           }
           imageMeta.textContent = '좋아요로 저장했어요.';
         }
+      } catch (e) {
+        imageMeta.textContent = `저장 실패: ${e?.message || 'unknown error'}`;
       } finally {
         state.feedbackLoading.delete(productUrl);
         render(state.items);
@@ -250,6 +259,8 @@
           }
           imageMeta.textContent = '해당 상품은 이후 검색에서 숨김 처리됩니다.';
         }
+      } catch (e) {
+        imageMeta.textContent = `저장 실패: ${e?.message || 'unknown error'}`;
       } finally {
         state.feedbackLoading.delete(productUrl);
         render(state.items);

@@ -46,6 +46,7 @@ CATEGORY_SYNONYMS = {
 }
 DISLIKED_PRODUCT_URLS: set[str] = set()
 LIKED_ITEMS: dict[str, dict] = {}
+DB_LAST_ERROR: str | None = None
 
 
 def _db_conn():
@@ -55,6 +56,7 @@ def _db_conn():
 
 
 def _load_feedback_from_db() -> None:
+    global DB_LAST_ERROR
     DISLIKED_PRODUCT_URLS.clear()
     LIKED_ITEMS.clear()
     if not USE_DB:
@@ -85,8 +87,10 @@ def _load_feedback_from_db() -> None:
                     url = (row.get("product_url") or "").strip()
                     if url:
                         DISLIKED_PRODUCT_URLS.add(url)
-    except Exception:
+        DB_LAST_ERROR = None
+    except Exception as e:
         # DB 장애 시 서비스 중단 방지
+        DB_LAST_ERROR = str(e)
         return
 
 
@@ -209,6 +213,18 @@ async def index():
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/storage-status")
+async def storage_status():
+    return {
+        "ok": True,
+        "storage": "db" if USE_DB else "local",
+        "db_enabled": USE_DB,
+        "db_last_error": DB_LAST_ERROR,
+        "liked_count": len(LIKED_ITEMS),
+        "disliked_count": len(DISLIKED_PRODUCT_URLS),
+    }
 
 
 def _apply_dislike_filter(items: list[dict]) -> list[dict]:
