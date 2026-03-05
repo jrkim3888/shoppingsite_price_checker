@@ -3,9 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import os
+
 from fastapi import FastAPI, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:  # pragma: no cover
+    psycopg = None
+    dict_row = None
 
 from app.schemas import SearchRequest, MoreRequest
 from app.services.search_service import SearchService
@@ -20,6 +29,9 @@ app.mount("/assets", StaticFiles(directory=FRONTEND_ROOT / "assets"), name="asse
 IMAGE_SEARCH_HISTORY = Path(__file__).resolve().parents[2] / "logs" / "image-search-history.jsonl"
 DISLIKE_HISTORY = Path(__file__).resolve().parents[2] / "logs" / "image-feedback-dislike.jsonl"
 LIKE_HISTORY = Path(__file__).resolve().parents[2] / "logs" / "image-feedback-like.jsonl"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_DB = bool(DATABASE_URL and psycopg is not None)
+
 CATEGORY_SYNONYMS = {
     "상의": "니트",
     "하의": "팬츠",
@@ -34,6 +46,109 @@ CATEGORY_SYNONYMS = {
 }
 DISLIKED_PRODUCT_URLS: set[str] = set()
 LIKED_ITEMS: dict[str, dict] = {}
+
+
+def _db_conn():
+    if not USE_DB:
+        return None
+    return psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+
+
+def _load_feedback_from_db() -> None:
+    DISLIKED_PRODUCT_URLS.clear()
+    LIKED_ITEMS.clear()
+    if not USE_DB:
+        return
+
+    try:
+        with _db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select product_url, title, brand, price, thumbnail, updated_at from liked_items"
+                )
+                for row in cur.fetchall():
+                    url = (row.get("product_url") or "").strip()
+                    if not url:
+                        continue
+                    LIKED_ITEMS[url] = {
+                        "ts": row.get("updated_at").isoformat() if row.get("updated_at") else "",
+                        "action": "like",
+                        "title": row.get("title") or "",
+                        "product_url": url,
+                        "brand": row.get("brand") or "",
+                        "price": row.get("price") or "",
+                        "thumbnail": row.get("thumbnail") or "",
+                    }
+
+                cur.execute("select product_url from disliked_items")
+                for row in cur.fetchall():
+                    url = (row.get("product_url") or "").strip()
+                    if url:
+                        DISLIKED_PRODUCT_URLS.add(url)
+    except Exception:
+        # DB 장애 시 서비스 중단 방지
+        return
+
+
+def _db_upsert_like(product_url: str, title: str, brand: str, price: str, thumbnail: str) -> None:
+    if not USE_DB:
+        return
+    with _db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into liked_items(product_url, title, brand, price, thumbnail, updated_at)
+                values (%s, %s, %s, %s, %s, now())
+                on conflict(product_url) do update
+                set title=excluded.title,
+                    brand=excluded.brand,
+                    price=excluded.price,
+                    thumbnail=excluded.thumbnail,
+                    updated_at=now()
+                """,
+                (product_url, title, brand, price, thumbnail),
+            )
+
+
+def _db_delete_like(product_url: str) -> None:
+    if not USE_DB:
+        return
+    with _db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("delete from liked_items where product_url=%s", (product_url,))
+
+
+def _db_upsert_dislike(product_url: str, title: str) -> None:
+    if not USE_DB:
+        return
+    with _db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into disliked_items(product_url, title, updated_at)
+                values (%s, %s, now())
+                on conflict(product_url) do update
+                set title=excluded.title,
+                    updated_at=now()
+                """,
+                (product_url, title),
+            )
+
+
+def _db_delete_dislike(product_url: str) -> None:
+    if not USE_DB:
+        return
+    with _db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("delete from disliked_items where product_url=%s", (product_url,))
+
+
+def _db_reset_dislikes() -> None:
+    if not USE_DB:
+        return
+    with _db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("delete from disliked_items")
 
 
 def _load_dislike_history() -> None:
@@ -79,8 +194,11 @@ def _load_like_history() -> None:
         return
 
 
-_load_dislike_history()
-_load_like_history()
+if USE_DB:
+    _load_feedback_from_db()
+else:
+    _load_dislike_history()
+    _load_like_history()
 
 
 @app.get("/")
@@ -156,48 +274,65 @@ async def image_feedback(
     thumbnail: str = Form(""),
 ):
     ts = datetime.now(timezone.utc).isoformat()
+    normalized_url = product_url.strip() if product_url else ""
+
     if action == "dislike":
-        if product_url:
-            DISLIKED_PRODUCT_URLS.add(product_url.strip())
+        if normalized_url:
+            DISLIKED_PRODUCT_URLS.add(normalized_url)
+            if USE_DB:
+                _db_upsert_dislike(normalized_url, title)
         DISLIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
         with DISLIKE_HISTORY.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": ts, "action": action, "title": title, "product_url": product_url}, ensure_ascii=False) + "\n")
+
     elif action == "undislike":
-        if product_url:
-            DISLIKED_PRODUCT_URLS.discard(product_url.strip())
+        if normalized_url:
+            DISLIKED_PRODUCT_URLS.discard(normalized_url)
+            if USE_DB:
+                _db_delete_dislike(normalized_url)
         DISLIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
         with DISLIKE_HISTORY.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": ts, "action": action, "title": title, "product_url": product_url}, ensure_ascii=False) + "\n")
+
     elif action == "like":
-        if product_url:
-            LIKED_ITEMS[product_url] = {
+        if normalized_url:
+            LIKED_ITEMS[normalized_url] = {
                 "ts": ts,
                 "action": "like",
                 "title": title,
-                "product_url": product_url,
+                "product_url": normalized_url,
                 "brand": brand,
                 "price": price,
                 "thumbnail": thumbnail,
             }
+            if USE_DB:
+                _db_upsert_like(normalized_url, title, brand, price, thumbnail)
             LIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
             with LIKE_HISTORY.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(LIKED_ITEMS[product_url], ensure_ascii=False) + "\n")
+                f.write(json.dumps(LIKED_ITEMS[normalized_url], ensure_ascii=False) + "\n")
+
     elif action == "unlike":
-        if product_url:
-            LIKED_ITEMS.pop(product_url, None)
+        if normalized_url:
+            LIKED_ITEMS.pop(normalized_url, None)
+            if USE_DB:
+                _db_delete_like(normalized_url)
             LIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
             with LIKE_HISTORY.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"ts": ts, "action": "unlike", "product_url": product_url}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"ts": ts, "action": "unlike", "product_url": normalized_url}, ensure_ascii=False) + "\n")
+
     return {
         "ok": True,
         "disliked_urls": len(DISLIKED_PRODUCT_URLS),
         "liked_count": len(LIKED_ITEMS),
+        "storage": "db" if USE_DB else "local",
     }
 
 
 @app.post("/image-feedback/reset-dislike")
 async def reset_dislike_feedback():
     DISLIKED_PRODUCT_URLS.clear()
+    if USE_DB:
+        _db_reset_dislikes()
     DISLIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
     with DISLIKE_HISTORY.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "action": "reset_dislike_all"}, ensure_ascii=False) + "\n")
@@ -206,6 +341,8 @@ async def reset_dislike_feedback():
 
 @app.get("/liked")
 async def liked_items():
+    if USE_DB:
+        _load_feedback_from_db()
     items = list(LIKED_ITEMS.values())
     items.sort(key=lambda x: x.get("ts", ""), reverse=True)
     return {"ok": True, "items": items}
@@ -213,6 +350,8 @@ async def liked_items():
 
 @app.get("/feedback-state")
 async def feedback_state():
+    if USE_DB:
+        _load_feedback_from_db()
     return {
         "ok": True,
         "liked_urls": list(LIKED_ITEMS.keys()),
@@ -271,7 +410,6 @@ async def image_search(
     reranked = rerank_by_image_similarity(data, raw_items, top_k=60)
     reranked = _apply_dislike_filter(reranked)
 
-    # 로컬 히스토리 저장(사용자에게는 미노출)
     IMAGE_SEARCH_HISTORY.parent.mkdir(parents=True, exist_ok=True)
     with IMAGE_SEARCH_HISTORY.open("a", encoding="utf-8") as f:
         f.write(
