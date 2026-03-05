@@ -45,6 +45,9 @@ def _load_dislike_history() -> None:
                 continue
             row = json.loads(line)
             action = row.get("action")
+            if action == "reset_dislike_all":
+                DISLIKED_PRODUCT_URLS.clear()
+                continue
             url = (row.get("product_url") or "").strip()
             if not url:
                 continue
@@ -190,6 +193,15 @@ async def image_feedback(
         "disliked_urls": len(DISLIKED_PRODUCT_URLS),
         "liked_count": len(LIKED_ITEMS),
     }
+
+
+@app.post("/image-feedback/reset-dislike")
+async def reset_dislike_feedback():
+    DISLIKED_PRODUCT_URLS.clear()
+    DISLIKE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    with DISLIKE_HISTORY.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "action": "reset_dislike_all"}, ensure_ascii=False) + "\n")
+    return {"ok": True, "disliked_urls": 0}
 
 
 @app.get("/liked")
